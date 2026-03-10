@@ -4,7 +4,9 @@ Schemas de Pydantic para Reserva.
 
 from pydantic import BaseModel, Field, validator
 from typing import Optional
-from datetime import datetime, date, time
+from datetime import datetime
+from datetime import date as dt_date
+from datetime import time as dt_time
 
 
 class ReservationBase(BaseModel):
@@ -37,13 +39,13 @@ class ReservationCreate(ReservationBase):
     customer_email: Optional[str] = None
     
     # Datos de la reserva
-    date: date = Field(..., description="Fecha de la reserva (YYYY-MM-DD)")
+    date: dt_date = Field(..., description="Fecha de la reserva (YYYY-MM-DD)")
     time: str = Field(..., pattern=r'^([01][0-9]|2[0-3]):[0-5][0-9]$', description="Hora (HH:MM)")
     
     @validator('date')
     def validate_date(cls, v):
         """Valida que la fecha no sea en el pasado"""
-        if v < date.today():
+        if v < dt_date.today():
             raise ValueError('No se pueden hacer reservas en fechas pasadas')
         return v
     
@@ -51,13 +53,13 @@ class ReservationCreate(ReservationBase):
     def validate_time(cls, v):
         """Valida que la hora esté en los rangos permitidos"""
         hour, minute = map(int, v.split(':'))
-        time_obj = time(hour, minute)
+        time_obj = dt_time(hour, minute)
         
         # Horarios permitidos: 12:30-15:00 y 20:30-23:30
-        lunch_start = time(12, 30)
-        lunch_end = time(15, 0)
-        dinner_start = time(20, 30)
-        dinner_end = time(23, 30)
+        lunch_start = dt_time(12, 30)
+        lunch_end = dt_time(15, 0)
+        dinner_start = dt_time(20, 30)
+        dinner_end = dt_time(23, 30)
         
         if not ((lunch_start <= time_obj <= lunch_end) or (dinner_start <= time_obj <= dinner_end)):
             raise ValueError(
@@ -69,7 +71,7 @@ class ReservationCreate(ReservationBase):
 class ReservationUpdate(BaseModel):
     """Schema para actualizar una reserva (solo admin)"""
     pax: Optional[int] = Field(None, gt=0, le=20)
-    date: Optional[date] = None
+    date: Optional[dt_date] = None
     time: Optional[str] = None
     event_type: Optional[str] = None
     requested_cava: Optional[bool] = None

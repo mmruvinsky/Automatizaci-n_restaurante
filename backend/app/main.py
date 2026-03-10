@@ -10,7 +10,7 @@ Este es el punto de entrada de tu API. Aquí se configuran:
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from app.core.config import settings
-from app.api import reservations, tables
+from app.api import reservation, tables  # <-- CORREGIDO: 'reservation' en singular
 
 # Crear aplicación FastAPI
 app = FastAPI(
@@ -29,7 +29,7 @@ app.add_middleware(
 )
 
 # Incluir routers (endpoints)
-app.include_router(reservations.router)
+app.include_router(reservation.router)  # <-- CORREGIDO: 'reservation' en singular
 app.include_router(tables.router)
 
 

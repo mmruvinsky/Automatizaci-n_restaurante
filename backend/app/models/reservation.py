@@ -14,20 +14,6 @@ from app.core.database import Base
 class Reservation(Base):
     """
     Representa una reserva en el restaurante.
-    
-    Atributos:
-        id: Identificador único
-        client_id: FK a tabla clients
-        table_id: FK a tabla tables (puede ser null si está pendiente)
-        date: Fecha de la reserva
-        time: Hora de la reserva
-        pax: Número de personas
-        event_type: 'normal', 'negocios', 'aniversario', 'celebracion'
-        requested_cava: Si el cliente pidió la cava
-        status: 'confirmed', 'pending', 'cancelled', 'completed'
-        special_flag: True si requiere atención especial (5-6 pax)
-        notes: Notas de la reserva
-        created_at: Timestamp de creación
     """
     __tablename__ = "reservations"
 
@@ -83,11 +69,6 @@ class Reservation(Base):
     def should_auto_confirm(self) -> bool:
         """
         Determina si la reserva debería confirmarse automáticamente.
-        
-        Reglas:
-            - Reservas <= 4 pax: confirmación automática
-            - Reservas 5-6 pax: flag especial pero puede confirmarse
-            - Reservas > 6 pax: siempre requieren confirmación manual
         """
         return self.pax <= 4
 
