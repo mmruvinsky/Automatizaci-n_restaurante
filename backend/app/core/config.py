@@ -3,7 +3,7 @@ Configuración centralizada de la aplicación.
 Este archivo lee las variables de entorno del archivo .env
 """
 
-from pydantic_settings import BaseSettings
+from pydantic_settings import BaseSettings, SettingsConfigDict
 from typing import Optional
 import pytz
 
@@ -39,9 +39,8 @@ class Settings(BaseSettings):
     CAVA_TABLE_ID: int = 1
     DEFAULT_MEAL_DURATION: int = 180  # minutos
     
-    class Config:
-        env_file = ".env"
-        case_sensitive = False
+    # NUEVA SINTAXIS PARA PYDANTIC V2
+    model_config = SettingsConfigDict(env_file=".env", case_sensitive=False)
 
     def get_timezone(self):
         """Retorna el objeto timezone configurado"""
