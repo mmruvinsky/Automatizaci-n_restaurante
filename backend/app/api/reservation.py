@@ -1,129 +1,97 @@
 """
 Endpoints de la API para Reservas.
-
-Estos son los puntos de entrada HTTP que el frontend usará.
 """
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status as http_status
 from sqlalchemy.orm import Session
 from typing import List, Optional
-from datetime import date
-from pydantic import BaseModel
+from datetime import date as date_type
+from slowapi import Limiter
+from slowapi.util import get_remote_address
 
 from app.core.database import get_db
 from app.schemas import ReservationCreate, ReservationResponse, ReservationListItem
-from app.services.reservation_service import ReservationService
+from app.schemas.reservation import ReservationStatusUpdate
+from app.services.reservation_service import ReservationService, ReservationNotFoundError, TableUnavailableError
 from app.services.whatsapp_service import whatsapp_service
+from app.services.audit_service import AuditService
 from app.models import Reservation
 from app.services.auth_service import require_admin
 from app.schemas.auth import UserInDB
 
-class ReservationStatusUpdate(BaseModel):
-    """Schema para actualizar el estado de una reserva"""
-    status: str
-    table_id: Optional[int] = None
-    admin_notes: Optional[str] = None
-
+limiter = Limiter(key_func=get_remote_address)
 router = APIRouter(prefix="/reservations", tags=["reservations"])
 
 
-@router.post("/", response_model=ReservationResponse, status_code=status.HTTP_201_CREATED)
+@router.post("/", response_model=ReservationResponse, status_code=http_status.HTTP_201_CREATED)
+@limiter.limit("5/minute;10/hour")
 def create_reservation(
+    request: Request,
     reservation: ReservationCreate,
     db: Session = Depends(get_db)
 ):
     """
-    **Crea una nueva reserva** (endpoint público - formulario web).
-    
-    El sistema aplica automáticamente:
-    - Busca o crea el cliente
-    - Aplica reglas de negocio
-    - Asigna mesa si es posible
-    - Actualiza nivel VIP
-    - Envía notificaciones
-    
-    Returns:
-        Reserva creada con su estado (confirmed/pending)
+    **Crea una nueva reserva** (endpoint público — formulario web).
+
+    Rate limit: máximo 5 requests por minuto y 10 por hora por IP.
     """
-    try:
-        # Crear reserva con toda la lógica de negocio
-        service = ReservationService(db)
-        new_reservation, message = service.create_reservation(reservation)
-        
-        # Enviar notificaciones según el estado
-        if new_reservation.status == "confirmed":
-            # Reserva confirmada → notificar cliente
-            whatsapp_service.send_confirmation(new_reservation)
-        else:
-            # Reserva pendiente → notificar cliente y admin
-            whatsapp_service.send_pending_notification(new_reservation)
-            whatsapp_service.notify_admin(new_reservation, message)
-        
-        # Si es un caso especial (5-6 pax), notificar admin
-        if new_reservation.special_flag:
-            whatsapp_service.notify_admin(
-                new_reservation, 
-                "Reserva de 5-6 personas - verificar disponibilidad"
-            )
-        
-        # Preparar respuesta con datos relacionados
-        response = ReservationResponse(
-            id=new_reservation.id,
-            client_id=new_reservation.client_id,
-            table_id=new_reservation.table_id,
-            date=new_reservation.date,
-            time=new_reservation.time,
-            pax=new_reservation.pax,
-            event_type=new_reservation.event_type,
-            requested_cava=new_reservation.requested_cava,
-            status=new_reservation.status,
-            special_flag=new_reservation.special_flag,
-            notes=new_reservation.notes,
-            admin_notes=new_reservation.admin_notes,
-            created_at=new_reservation.created_at,
-            client_name=new_reservation.client.full_name if new_reservation.client else None,
-            client_phone=new_reservation.client.phone if new_reservation.client else None,
-            client_vip_level=new_reservation.client.vip_level if new_reservation.client else None,
-            table_name=new_reservation.table.name if new_reservation.table else None
+    service = ReservationService(db)
+    new_reservation, message = service.create_reservation(reservation)
+
+    if new_reservation.status == "confirmed":
+        whatsapp_service.send_confirmation(new_reservation)
+    else:
+        whatsapp_service.send_pending_notification(new_reservation)
+        whatsapp_service.notify_admin(new_reservation, message)
+
+    if new_reservation.special_flag:
+        whatsapp_service.notify_admin(
+            new_reservation,
+            "Reserva de 5-6 personas - verificar disponibilidad"
         )
-        
-        return response
-        
-    except Exception as e:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Error al crear reserva: {str(e)}"
-        )
+
+    return ReservationResponse(
+        id=new_reservation.id,
+        client_id=new_reservation.client_id,
+        table_id=new_reservation.table_id,
+        date=new_reservation.date,
+        time=new_reservation.time,
+        pax=new_reservation.pax,
+        event_type=new_reservation.event_type,
+        requested_cava=new_reservation.requested_cava,
+        status=new_reservation.status,
+        special_flag=new_reservation.special_flag,
+        notes=new_reservation.notes,
+        admin_notes=new_reservation.admin_notes,
+        created_at=new_reservation.created_at,
+        client_name=new_reservation.client.full_name if new_reservation.client else None,
+        client_phone=new_reservation.client.phone if new_reservation.client else None,
+        client_vip_level=new_reservation.client.vip_level if new_reservation.client else None,
+        table_name=new_reservation.table.name if new_reservation.table else None
+    )
 
 
 @router.get("/", response_model=List[ReservationListItem])
 def list_reservations(
-    date: date = None,
+    date: date_type = None,
     status: str = None,
     db: Session = Depends(get_db)
 ):
     """
     **Lista reservas** con filtros opcionales (panel admin).
-    
-    Query params:
-        - date: Filtrar por fecha específica
-        - status: Filtrar por estado (confirmed/pending/cancelled)
     """
-    query = db.query(Reservation)
-    
-    # Aplicar filtros
+    service = ReservationService(db)
+
     if date:
-        service = ReservationService(db)
         reservations = service.get_reservations_by_date(date)
     else:
+        query = db.query(Reservation)
         if status:
             query = query.filter(Reservation.status == status)
         reservations = query.all()
-    
-    # Mapear a schema de respuesta
-    result = []
-    for res in reservations:
-        result.append(ReservationListItem(
+
+    return [
+        ReservationListItem(
             id=res.id,
             client_name=res.client.full_name,
             phone=res.client.phone,
@@ -136,9 +104,9 @@ def list_reservations(
             vip_level=res.client.vip_level,
             requested_cava=res.requested_cava,
             special_flag=res.special_flag
-        ))
-    
-    return result
+        )
+        for res in reservations
+    ]
 
 
 @router.get("/{reservation_id}", response_model=ReservationResponse)
@@ -150,13 +118,12 @@ def get_reservation(
     **Obtiene una reserva específica** por ID.
     """
     reservation = db.query(Reservation).filter(Reservation.id == reservation_id).first()
-    
     if not reservation:
         raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
+            status_code=http_status.HTTP_404_NOT_FOUND,
             detail="Reserva no encontrada"
         )
-    
+
     return ReservationResponse(
         id=reservation.id,
         client_id=reservation.client_id,
@@ -181,63 +148,100 @@ def get_reservation(
 @router.patch("/{reservation_id}/status")
 def update_reservation_status(
     reservation_id: int,
-    status: str,
-    table_id: int = None,
-    admin_notes: str = None,
-    db: Session = Depends(get_db)
+    body: ReservationStatusUpdate,
+    db: Session = Depends(get_db),
+    current_user: UserInDB = Depends(require_admin)
 ):
     """
-    **Actualiza el estado de una reserva** (panel admin).
-    
-    Body:
-        - status: 'confirmed', 'pending', 'cancelled', 'completed'
-        - table_id: (opcional) Asignar mesa
-        - admin_notes: (opcional) Notas internas
+    **Actualiza el estado de una reserva**. Requiere autenticación de administrador.
     """
+    service = ReservationService(db)
+    audit = AuditService(db)
+
     try:
-        service = ReservationService(db)
-        updated_reservation = service.update_reservation_status(
+        # Capturar estado anterior antes de modificar
+        reservation = db.query(Reservation).filter(Reservation.id == reservation_id).first()
+        if not reservation:
+            raise ReservationNotFoundError()
+
+        previous_status = reservation.status
+        previous_table = reservation.table.name if reservation.table else None
+
+        updated = service.update_reservation_status(
             reservation_id=reservation_id,
-            status=status,
-            table_id=table_id,
-            admin_notes=admin_notes
+            status=body.status,
+            table_id=body.table_id,
+            admin_notes=body.admin_notes
         )
-        
-        # Si se confirmó, enviar notificación
-        if status == "confirmed":
-            whatsapp_service.send_confirmation(updated_reservation)
-        
-        return {"message": "Reserva actualizada", "reservation_id": reservation_id}
-        
-    except ValueError as e:
+
+    except ReservationNotFoundError:
         raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
+            status_code=http_status.HTTP_404_NOT_FOUND,
+            detail="Reserva no encontrada"
+        )
+    except TableUnavailableError as e:
+        raise HTTPException(
+            status_code=http_status.HTTP_409_CONFLICT,
             detail=str(e)
         )
-    except Exception as e:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Error actualizando reserva: {str(e)}"
+
+    # Auditar cambio de estado
+    if previous_status != body.status:
+        audit.log(
+            reservation_id=reservation_id,
+            action="status_change",
+            previous_value=previous_status,
+            new_value=body.status,
+            performed_by=current_user.username,
+            note=body.admin_notes,
         )
+
+    # Auditar asignación de mesa
+    if body.table_id is not None:
+        new_table_name = updated.table.name if updated.table else str(body.table_id)
+        audit.log(
+            reservation_id=reservation_id,
+            action="table_assigned",
+            previous_value=previous_table,
+            new_value=new_table_name,
+            performed_by=current_user.username,
+        )
+
+    db.commit()
+
+    if body.status == "confirmed":
+        whatsapp_service.send_confirmation(updated)
+
+    return {"message": "Reserva actualizada", "reservation_id": reservation_id}
 
 
 @router.delete("/{reservation_id}")
 def cancel_reservation(
     reservation_id: int,
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    current_user: UserInDB = Depends(require_admin)
 ):
     """
-    **Cancela una reserva** (cambia estado a cancelled).
+    **Cancela una reserva**. Requiere autenticación de administrador.
     """
     reservation = db.query(Reservation).filter(Reservation.id == reservation_id).first()
-    
     if not reservation:
         raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
+            status_code=http_status.HTTP_404_NOT_FOUND,
             detail="Reserva no encontrada"
         )
-    
+
+    previous_status = reservation.status
     reservation.status = "cancelled"
+
+    audit = AuditService(db)
+    audit.log(
+        reservation_id=reservation_id,
+        action="cancelled",
+        previous_value=previous_status,
+        new_value="cancelled",
+        performed_by=current_user.username,
+    )
+
     db.commit()
-    
     return {"message": "Reserva cancelada", "reservation_id": reservation_id}

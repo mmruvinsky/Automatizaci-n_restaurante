@@ -18,10 +18,9 @@ class ReservationBase(BaseModel):
     )
     requested_cava: bool = Field(default=False, description="¿Solicita la cava?")
     notes: Optional[str] = Field(None, max_length=500, description="Notas del cliente")
-    
+
     @validator('event_type')
     def validate_event_type(cls, v):
-        """Valida que el tipo de evento sea válido"""
         valid_types = ['normal', 'negocios', 'aniversario', 'celebracion']
         if v not in valid_types:
             raise ValueError(f'event_type debe ser uno de: {", ".join(valid_types)}')
@@ -29,42 +28,28 @@ class ReservationBase(BaseModel):
 
 
 class ReservationCreate(ReservationBase):
-    """
-    Schema para crear una reserva desde el formulario público.
-    El cliente proporciona sus datos y los detalles de la reserva.
-    """
-    # Datos del cliente
+    """Schema para crear una reserva desde el formulario público."""
     customer_name: str = Field(..., min_length=2, max_length=100)
     customer_phone: str = Field(..., pattern=r'^\+?[0-9]{10,15}$')
     customer_email: Optional[str] = None
-    
-    # Datos de la reserva
+
     date: dt_date = Field(..., description="Fecha de la reserva (YYYY-MM-DD)")
     time: str = Field(..., pattern=r'^([01][0-9]|2[0-3]):[0-5][0-9]$', description="Hora (HH:MM)")
-    
+
     @validator('date')
     def validate_date(cls, v):
-        """Valida que la fecha no sea en el pasado"""
         if v < dt_date.today():
             raise ValueError('No se pueden hacer reservas en fechas pasadas')
         return v
-    
+
     @validator('time')
     def validate_time(cls, v):
-        """Valida que la hora esté en los rangos permitidos"""
         hour, minute = map(int, v.split(':'))
         time_obj = dt_time(hour, minute)
-        
-        # Horarios permitidos: 12:30-15:00 y 20:30-23:30
-        lunch_start = dt_time(12, 30)
-        lunch_end = dt_time(15, 0)
-        dinner_start = dt_time(20, 30)
-        dinner_end = dt_time(23, 30)
-        
+        lunch_start, lunch_end = dt_time(12, 30), dt_time(15, 0)
+        dinner_start, dinner_end = dt_time(20, 30), dt_time(23, 30)
         if not ((lunch_start <= time_obj <= lunch_end) or (dinner_start <= time_obj <= dinner_end)):
-            raise ValueError(
-                'Horarios permitidos: 12:30-15:00 (almuerzo) o 20:30-23:30 (cena)'
-            )
+            raise ValueError('Horarios permitidos: 12:30-15:00 (almuerzo) o 20:30-23:30 (cena)')
         return v
 
 
@@ -79,13 +64,27 @@ class ReservationUpdate(BaseModel):
     table_id: Optional[int] = None
     special_flag: Optional[bool] = None
     admin_notes: Optional[str] = None
-    
+
     @validator('status')
     def validate_status(cls, v):
         if v is not None:
             valid_statuses = ['confirmed', 'pending', 'cancelled', 'completed']
             if v not in valid_statuses:
                 raise ValueError(f'status debe ser uno de: {", ".join(valid_statuses)}')
+        return v
+
+
+class ReservationStatusUpdate(BaseModel):
+    """Schema para actualizar el estado de una reserva desde el panel admin."""
+    status: str
+    table_id: Optional[int] = None
+    admin_notes: Optional[str] = None
+
+    @validator('status')
+    def validate_status(cls, v):
+        valid_statuses = ['confirmed', 'pending', 'cancelled', 'completed']
+        if v not in valid_statuses:
+            raise ValueError(f'status debe ser uno de: {", ".join(valid_statuses)}')
         return v
 
 
@@ -100,15 +99,12 @@ class ReservationResponse(ReservationBase):
     special_flag: bool
     admin_notes: Optional[str]
     created_at: datetime
-    
-    # Datos del cliente (nested)
+
     client_name: Optional[str] = None
     client_phone: Optional[str] = None
     client_vip_level: Optional[str] = None
-    
-    # Datos de la mesa (nested)
     table_name: Optional[str] = None
-    
+
     class Config:
         from_attributes = True
 
@@ -127,6 +123,6 @@ class ReservationListItem(BaseModel):
     vip_level: str
     requested_cava: bool
     special_flag: bool
-    
+
     class Config:
         from_attributes = True
