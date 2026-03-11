@@ -6,14 +6,23 @@ Estos son los puntos de entrada HTTP que el frontend usará.
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
-from typing import List
+from typing import List, Optional
 from datetime import date
+from pydantic import BaseModel
 
 from app.core.database import get_db
 from app.schemas import ReservationCreate, ReservationResponse, ReservationListItem
 from app.services.reservation_service import ReservationService
 from app.services.whatsapp_service import whatsapp_service
 from app.models import Reservation
+from app.services.auth_service import require_admin
+from app.schemas.auth import UserInDB
+
+class ReservationStatusUpdate(BaseModel):
+    """Schema para actualizar el estado de una reserva"""
+    status: str
+    table_id: Optional[int] = None
+    admin_notes: Optional[str] = None
 
 router = APIRouter(prefix="/reservations", tags=["reservations"])
 
