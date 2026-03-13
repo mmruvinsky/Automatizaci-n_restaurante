@@ -1,5 +1,10 @@
 """
-Servicio de Reservas - Contiene toda la lógica de negocio.
+Servicio de Reservas - Lógica de negocio.
+
+Reglas de grupo (sin límite de pax):
+  ≤ 4  → confirmación automática, mesa estándar
+  5-15 → mesa especial + aviso a cocina (special_flag=True)
+  > 15 → delegado a encargado humano, sin asignación automática
 """
 
 from sqlalchemy.orm import Session
@@ -11,16 +16,18 @@ from app.models import Table, Client, Reservation
 from app.schemas import ReservationCreate
 from app.core.config import settings
 
+# ── Umbrales de grupo ─────────────────────────────────────────────────────────
+LARGE_GROUP_THRESHOLD = 4   # > 4: mesa especial + aviso cocina
+MANAGER_THRESHOLD = 15      # > 15: delegar a encargado humano
+
 
 # ── Excepciones de dominio ────────────────────────────────────────────────────
 
 class ReservationNotFoundError(Exception):
     """La reserva solicitada no existe."""
 
-
 class TableUnavailableError(Exception):
     """La mesa solicitada no está disponible en ese horario."""
-
 
 class InvalidReservationDataError(Exception):
     """Los datos de la reserva son inválidos."""
@@ -29,19 +36,12 @@ class InvalidReservationDataError(Exception):
 # ── Servicio ──────────────────────────────────────────────────────────────────
 
 class ReservationService:
-    """Servicio que maneja toda la lógica de reservas"""
 
     def __init__(self, db: Session):
         self.db = db
         self.tz = settings.get_timezone()
 
     def create_reservation(self, reservation_data: ReservationCreate) -> Tuple[Reservation, str]:
-        """
-        Crea una nueva reserva aplicando todas las reglas de negocio.
-
-        Returns:
-            (reserva, mensaje): Tupla con la reserva creada y un mensaje informativo
-        """
         client = self._get_or_create_client(
             name=reservation_data.customer_name,
             phone=reservation_data.customer_phone,
@@ -63,15 +63,15 @@ class ReservationService:
         assigned, message = self._assign_table(reservation, client)
 
         self.db.add(reservation)
-
         client.total_reservations += 1
         client.last_visit_at = datetime.now(self.tz)
         client.update_vip_level()
 
         self.db.commit()
         self.db.refresh(reservation)
-
         return reservation, message
+
+    # ── Helpers ───────────────────────────────────────────────────────────────
 
     def _get_or_create_client(self, name: str, phone: str, email: Optional[str]) -> Client:
         client = self.db.query(Client).filter(Client.phone == phone).first()
@@ -86,25 +86,44 @@ class ReservationService:
         dt = datetime.combine(date_obj, time(hour, minute))
         return self.tz.localize(dt)
 
+    # ── Reglas de negocio ─────────────────────────────────────────────────────
+
     def _apply_business_rules(self, reservation: Reservation, client: Client):
         pax = reservation.pax
 
-        if pax <= 4:
+        if pax > MANAGER_THRESHOLD:
+            # Requiere gestión humana — encargado se hace cargo
+            reservation.status = "pending"
+            reservation.special_flag = True
+            reservation.admin_notes = (
+                f"GRUPO GRANDE ({pax} personas) — delegado a encargado. "
+                "Requiere coordinación manual de mesas y aviso a cocina."
+            )
+
+        elif pax > LARGE_GROUP_THRESHOLD:
+            # Mesa especial + cocina debe estar lista
+            reservation.status = "pending"
+            reservation.special_flag = True
+            reservation.admin_notes = (
+                f"Grupo de {pax} personas — armar mesa especial y avisar a cocina."
+            )
+
+        else:
+            # ≤ 4: flujo normal
             reservation.status = "pending"
             reservation.special_flag = False
-        elif pax <= 6:
-            reservation.special_flag = True
-            reservation.status = "pending"
-        else:
-            reservation.status = "pending"
-            reservation.special_flag = True
-            reservation.admin_notes = "Reserva de grupo grande - requiere confirmación manual"
 
     def _assign_table(self, reservation: Reservation, client: Client) -> Tuple[bool, str]:
         pax = reservation.pax
         is_vip = client.vip_level == "vip"
 
-        # Caso 1: VIP o evento especial + cava solicitada
+        # Grupos > 15: sin asignación automática, encargado gestiona
+        if pax > MANAGER_THRESHOLD:
+            return False, (
+                f"Grupo de {pax} personas — encargado notificado para gestión manual."
+            )
+
+        # Cava: VIP o evento especial + solicitada + ≤ 6
         if (is_vip or reservation.is_event_special) and reservation.requested_cava and pax <= 6:
             if self._is_cava_available(reservation.date, reservation.time):
                 cava_table = self.db.query(Table).filter(
@@ -121,8 +140,8 @@ class ReservationService:
             reservation.admin_notes = "Cliente solicita cava - verificar disponibilidad"
             return False, "Cava no disponible - reserva pendiente de confirmación"
 
-        # Caso 2: ≤4 pax → mesa estándar automática
-        if pax <= 4:
+        # ≤ 4: mesa estándar automática
+        if pax <= LARGE_GROUP_THRESHOLD:
             standard_table = self._find_available_standard_table(
                 reservation.date, reservation.time, pax
             )
@@ -133,16 +152,12 @@ class ReservationService:
             reservation.status = "pending"
             return False, "No hay mesas disponibles - reserva pendiente"
 
-        # Caso 3: 5-6 pax
-        if pax <= 6:
-            reservation.status = "pending"
-            reservation.admin_notes = "Verificar disponibilidad para 5-6 personas"
-            return False, "Reserva pendiente de confirmación (5-6 personas)"
+        # 5-15: pendiente, encargado arma mesa especial
+        return False, (
+            f"Grupo de {pax} personas — pendiente armado de mesa especial y aviso a cocina."
+        )
 
-        # Caso 4: >6 pax
-        reservation.status = "pending"
-        reservation.admin_notes = f"Grupo grande ({pax} personas) - requiere configuración de mesas"
-        return False, "Reserva pendiente - grupo grande requiere confirmación"
+    # ── Disponibilidad ────────────────────────────────────────────────────────
 
     def _is_cava_available(self, date: datetime, time: str) -> bool:
         cava_table = self.db.query(Table).filter(
@@ -150,17 +165,14 @@ class ReservationService:
         ).first()
         if not cava_table:
             return False
-
         time_start = date - timedelta(hours=3)
         time_end = date + timedelta(hours=3)
-
         conflict = self.db.query(Reservation).filter(
             Reservation.table_id == cava_table.id,
             Reservation.date >= time_start,
             Reservation.date <= time_end,
             Reservation.status.in_(["confirmed", "pending"])
         ).first()
-
         return conflict is None
 
     def _find_available_standard_table(
@@ -187,13 +199,11 @@ class ReservationService:
             ).first()
             if not conflict:
                 return table
-
         return None
 
     def get_reservations_by_date(self, target_date: date) -> List[Reservation]:
         start = datetime.combine(target_date, time.min)
         end = datetime.combine(target_date, time.max)
-
         return self.db.query(Reservation).filter(
             Reservation.date >= self.tz.localize(start),
             Reservation.date <= self.tz.localize(end)
@@ -206,13 +216,6 @@ class ReservationService:
         table_id: Optional[int] = None,
         admin_notes: Optional[str] = None
     ) -> Reservation:
-        """
-        Actualiza el estado de una reserva.
-
-        Raises:
-            ReservationNotFoundError: si la reserva no existe.
-            TableUnavailableError: si la mesa ya está ocupada en ese horario.
-        """
         reservation = self.db.query(Reservation).filter(
             Reservation.id == reservation_id
         ).first()
@@ -221,10 +224,8 @@ class ReservationService:
             raise ReservationNotFoundError(f"Reserva #{reservation_id} no encontrada")
 
         if table_id is not None:
-            # Verificar que la mesa no tenga otro conflicto (excluyendo esta misma reserva)
             time_start = reservation.date - timedelta(hours=3)
             time_end = reservation.date + timedelta(hours=3)
-
             conflict = self.db.query(Reservation).filter(
                 Reservation.table_id == table_id,
                 Reservation.date >= time_start,
@@ -232,16 +233,13 @@ class ReservationService:
                 Reservation.status.in_(["confirmed", "pending"]),
                 Reservation.id != reservation_id
             ).first()
-
             if conflict:
                 raise TableUnavailableError(
                     f"La mesa {table_id} ya tiene una reserva en ese horario (reserva #{conflict.id})"
                 )
-
             reservation.table_id = table_id
 
         reservation.status = status
-
         if admin_notes is not None:
             reservation.admin_notes = admin_notes
 

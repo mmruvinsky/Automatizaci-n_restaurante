@@ -1,7 +1,5 @@
 """
 Servicio de WhatsApp con Twilio.
-
-Este servicio envía notificaciones automáticas al cliente y al personal.
 """
 
 from twilio.rest import Client
@@ -11,184 +9,200 @@ from app.models import Reservation
 
 
 class WhatsAppService:
-    """Servicio para enviar mensajes de WhatsApp via Twilio"""
-    
+
     def __init__(self):
-        """Inicializa el cliente de Twilio si las credenciales están configuradas"""
         if settings.TWILIO_ACCOUNT_SID and settings.TWILIO_AUTH_TOKEN:
-            self.client = Client(
-                settings.TWILIO_ACCOUNT_SID, 
-                settings.TWILIO_AUTH_TOKEN
-            )
+            self.client = Client(settings.TWILIO_ACCOUNT_SID, settings.TWILIO_AUTH_TOKEN)
             self.from_whatsapp = settings.TWILIO_WHATSAPP_FROM
             self.admin_whatsapp = settings.ADMIN_WHATSAPP
             self.enabled = True
         else:
             self.client = None
             self.enabled = False
-    
+
+    # ── Notificaciones al cliente ─────────────────────────────────────────────
+
     def send_confirmation(self, reservation: Reservation) -> bool:
-        """
-        Envía confirmación de reserva al cliente.
-        
-        Args:
-            reservation: Objeto de reserva
-            
-        Returns:
-            True si se envió exitosamente, False si hubo error o está deshabilitado
-        """
         if not self.enabled:
             print("⚠️  WhatsApp deshabilitado - configura Twilio en .env")
             return False
-        
         try:
-            # Formatear el mensaje
-            message = self._format_confirmation_message(reservation)
-            
-            # Preparar número del cliente (debe estar en formato internacional)
-            to_whatsapp = f"whatsapp:{reservation.client.phone}"
-            
-            # Enviar mensaje
             self.client.messages.create(
-                body=message,
+                body=self._format_confirmation_message(reservation),
                 from_=self.from_whatsapp,
-                to=to_whatsapp
+                to=f"whatsapp:{reservation.client.phone}"
             )
-            
             print(f"✅ Confirmación enviada a {reservation.client.full_name}")
             return True
-            
         except Exception as e:
-            print(f"❌ Error enviando WhatsApp: {str(e)}")
+            print(f"❌ Error enviando WhatsApp: {e}")
             return False
-    
+
     def send_pending_notification(self, reservation: Reservation) -> bool:
-        """
-        Envía notificación al cliente sobre reserva pendiente.
-        """
         if not self.enabled:
             return False
-        
         try:
-            message = self._format_pending_message(reservation)
-            to_whatsapp = f"whatsapp:{reservation.client.phone}"
-            
             self.client.messages.create(
-                body=message,
+                body=self._format_pending_message(reservation),
                 from_=self.from_whatsapp,
-                to=to_whatsapp
+                to=f"whatsapp:{reservation.client.phone}"
             )
-            
             print(f"✅ Notificación pendiente enviada a {reservation.client.full_name}")
             return True
-            
         except Exception as e:
-            print(f"❌ Error enviando WhatsApp: {str(e)}")
+            print(f"❌ Error enviando WhatsApp: {e}")
             return False
-    
+
+    # ── Notificaciones al admin / encargados ──────────────────────────────────
+
     def notify_admin(self, reservation: Reservation, reason: str) -> bool:
+        """Aviso genérico al admin para reservas pendientes."""
+        if not self.enabled or not self.admin_whatsapp:
+            print("⚠️  Notificaciones admin deshabilitadas")
+            return False
+        try:
+            self.client.messages.create(
+                body=self._format_admin_notification(reservation, reason),
+                from_=self.from_whatsapp,
+                to=self.admin_whatsapp
+            )
+            print("✅ Notificación enviada al admin")
+            return True
+        except Exception as e:
+            print(f"❌ Error enviando notificación admin: {e}")
+            return False
+
+    def notify_large_group(self, reservation: Reservation) -> bool:
         """
-        Notifica al personal/admin sobre una reserva que requiere atención.
-        
-        Args:
-            reservation: Objeto de reserva
-            reason: Razón de la notificación
+        Avisa al encargado que hay un grupo de 5-15 personas.
+        Acción esperada: armar mesa especial y avisar a cocina.
         """
         if not self.enabled or not self.admin_whatsapp:
             print("⚠️  Notificaciones admin deshabilitadas")
             return False
-        
         try:
-            message = self._format_admin_notification(reservation, reason)
-            
             self.client.messages.create(
-                body=message,
+                body=self._format_large_group_message(reservation),
                 from_=self.from_whatsapp,
                 to=self.admin_whatsapp
             )
-            
-            print(f"✅ Notificación enviada al admin")
+            print(f"✅ Aviso grupo grande enviado ({reservation.pax} personas)")
             return True
-            
         except Exception as e:
-            print(f"❌ Error enviando notificación admin: {str(e)}")
+            print(f"❌ Error enviando aviso grupo grande: {e}")
             return False
-    
+
+    def notify_manager_required(self, reservation: Reservation) -> bool:
+        """
+        Avisa al encargado que hay un grupo de más de 15 personas
+        y que debe gestionar la reserva manualmente.
+        """
+        if not self.enabled or not self.admin_whatsapp:
+            print("⚠️  Notificaciones admin deshabilitadas")
+            return False
+        try:
+            self.client.messages.create(
+                body=self._format_manager_required_message(reservation),
+                from_=self.from_whatsapp,
+                to=self.admin_whatsapp
+            )
+            print(f"✅ Aviso encargado enviado ({reservation.pax} personas)")
+            return True
+        except Exception as e:
+            print(f"❌ Error enviando aviso encargado: {e}")
+            return False
+
+    # ── Formatters ────────────────────────────────────────────────────────────
+
     def _format_confirmation_message(self, reservation: Reservation) -> str:
-        """Formatea el mensaje de confirmación para el cliente"""
         date_str = reservation.date.strftime("%d/%m/%Y")
-        
-        msg = f"""🎉 *Reserva Confirmada - Jamonería*
-
-Hola {reservation.client.full_name}!
-
-Tu reserva ha sido confirmada:
-
-📅 Fecha: {date_str}
-🕐 Hora: {reservation.time}
-👥 Personas: {reservation.pax}
-"""
-        
+        msg = (
+            f"🎉 *Reserva Confirmada - MM*\n\n"
+            f"Hola {reservation.client.full_name}!\n\n"
+            f"Tu reserva ha sido confirmada:\n\n"
+            f"📅 Fecha: {date_str}\n"
+            f"🕐 Hora: {reservation.time}\n"
+            f"👥 Personas: {reservation.pax}\n"
+        )
         if reservation.table and reservation.table.type == "cava":
-            msg += "🍷 Mesa: Cava (especial)\n"
+            msg += "Mesa: Cava (especial)\n"
         elif reservation.table:
-            msg += f"🪑 Mesa: {reservation.table.name}\n"
-        
+            msg += f"Mesa: {reservation.table.name}\n"
         if reservation.event_type != "normal":
-            msg += f"🎊 Ocasión: {reservation.event_type.capitalize()}\n"
-        
-        msg += "\n¡Te esperamos! 🍴"
-        
+            msg += f"Ocasión: {reservation.event_type.capitalize()}\n"
+        msg += "\nMuchas gracias por elegirnos. Los esperamos en calle Noruega 1382, oeste capital."
         return msg
-    
+
     def _format_pending_message(self, reservation: Reservation) -> str:
-        """Formatea el mensaje de reserva pendiente"""
         date_str = reservation.date.strftime("%d/%m/%Y")
-        
-        msg = f"""⏳ *Reserva Recibida - Jamonería*
+        return (
+            f"⏳ *Reserva Recibida - Jamonería*\n\n"
+            f"Hola {reservation.client.full_name}!\n\n"
+            f"Recibimos tu solicitud:\n\n"
+            f"📅 Fecha: {date_str}\n"
+            f"🕐 Hora: {reservation.time}\n"
+            f"👥 Personas: {reservation.pax}\n\n"
+            f"Tu reserva está *pendiente de confirmación*.\n"
+            f"Te contactaremos pronto. Gracias! 🙏"
+        )
 
-Hola {reservation.client.full_name}!
-
-Hemos recibido tu solicitud de reserva:
-
-📅 Fecha: {date_str}
-🕐 Hora: {reservation.time}
-👥 Personas: {reservation.pax}
-
-Tu reserva está *pendiente de confirmación*. 
-Te contactaremos pronto para confirmar.
-
-Gracias por tu paciencia! 🙏
-"""
-        return msg
-    
     def _format_admin_notification(self, reservation: Reservation, reason: str) -> str:
-        """Formatea la notificación para el admin/personal"""
         date_str = reservation.date.strftime("%d/%m/%Y")
-        
-        msg = f"""🔔 *Nueva Reserva Requiere Atención*
-
-📋 ID: #{reservation.id}
-👤 Cliente: {reservation.client.full_name}
-📞 Tel: {reservation.client.phone}
-⭐ Nivel: {reservation.client.vip_level.upper()}
-
-📅 Fecha: {date_str}
-🕐 Hora: {reservation.time}
-👥 PAX: {reservation.pax}
-"""
-        
+        msg = (
+            f"🔔 *Nueva Reserva Requiere Atención*\n\n"
+            f"📋 ID: #{reservation.id}\n"
+            f"👤 {reservation.client.full_name}\n"
+            f"📞 {reservation.client.phone}\n"
+            f"⭐ {reservation.client.vip_level.upper()}\n\n"
+            f"📅 {date_str} — 🕐 {reservation.time} — 👥 {reservation.pax} pax\n"
+        )
         if reservation.event_type != "normal":
             msg += f"🎊 Evento: {reservation.event_type}\n"
-        
         if reservation.requested_cava:
             msg += "🍷 Solicita: CAVA\n"
-        
-        msg += f"\n⚠️ Razón: {reason}\n"
-        msg += "\n👉 Revisar en panel admin"
-        
+        msg += f"\n⚠️ {reason}\n\n👉 Revisar en panel admin"
         return msg
 
+    def _format_large_group_message(self, reservation: Reservation) -> str:
+        """Mensaje para grupos de 5 a 15 personas: armar mesa especial + avisar a cocina."""
+        date_str = reservation.date.strftime("%d/%m/%Y")
+        return (
+            f"🪑 *Grupo Grande — Armar Mesa Especial*\n\n"
+            f"Llegó una reserva de *{reservation.pax} personas* "
+            f"que necesita preparación especial.\n\n"
+            f"📋 ID: #{reservation.id}\n"
+            f"👤 {reservation.client.full_name}\n"
+            f"📞 {reservation.client.phone}\n\n"
+            f"📅 {date_str} — 🕐 {reservation.time}\n"
+            f"🎉 Ocasión: {reservation.event_type.capitalize()}\n\n"
+            f"✅ *Acciones requeridas:*\n"
+            f"  1. Armar mesa especial para {reservation.pax} personas\n"
+            f"  2. Avisar a cocina para que los espere\n"
+            f"  3. Confirmar reserva en el panel admin\n\n"
+            f"👉 Panel admin para confirmar"
+        )
 
-# Instancia global del servicio
+    def _format_manager_required_message(self, reservation: Reservation) -> str:
+        """Mensaje para grupos de más de 15 personas: delegado al encargado."""
+        date_str = reservation.date.strftime("%d/%m/%Y")
+        return (
+            f"🚨 *Grupo Muy Grande — Gestión de Encargado*\n\n"
+            f"Reserva de *{reservation.pax} personas* recibida.\n"
+            f"Supera los 15 cubiertos — requiere gestión manual completa.\n\n"
+            f"📋 ID: #{reservation.id}\n"
+            f"👤 {reservation.client.full_name}\n"
+            f"📞 {reservation.client.phone}\n"
+            f"⭐ {reservation.client.vip_level.upper()}\n\n"
+            f"📅 {date_str} — 🕐 {reservation.time}\n"
+            f"🎉 Ocasión: {reservation.event_type.capitalize()}\n\n"
+            f"✅ *Encargado debe:*\n"
+            f"  1. Contactar al cliente para coordinar\n"
+            f"  2. Definir disposición de mesas\n"
+            f"  3. Coordinar menú y tiempos con cocina\n"
+            f"  4. Confirmar o rechazar en el panel admin\n\n"
+            f"⚠️ El sistema NO asignó mesa automáticamente."
+        )
+
+
+# Instancia global
 whatsapp_service = WhatsAppService()

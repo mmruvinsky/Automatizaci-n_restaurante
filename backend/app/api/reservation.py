@@ -12,7 +12,13 @@ from slowapi.util import get_remote_address
 from app.core.database import get_db
 from app.schemas import ReservationCreate, ReservationResponse, ReservationListItem
 from app.schemas.reservation import ReservationStatusUpdate
-from app.services.reservation_service import ReservationService, ReservationNotFoundError, TableUnavailableError
+from app.services.reservation_service import (
+    ReservationService,
+    ReservationNotFoundError,
+    TableUnavailableError,
+    LARGE_GROUP_THRESHOLD,
+    MANAGER_THRESHOLD,
+)
 from app.services.whatsapp_service import whatsapp_service
 from app.services.audit_service import AuditService
 from app.models import Reservation
@@ -31,25 +37,34 @@ def create_reservation(
     db: Session = Depends(get_db)
 ):
     """
-    **Crea una nueva reserva** (endpoint público — formulario web).
+    **Crea una nueva reserva** (endpoint público).
 
-    Rate limit: máximo 5 requests por minuto y 10 por hora por IP.
+    Reglas de notificación por tamaño de grupo:
+    - ≤ 4 personas  → confirmación automática si hay mesa.
+    - 5-15 personas → aviso a encargado: armar mesa especial + avisar a cocina.
+    - > 15 personas → delegado al encargado humano, sin asignación automática.
     """
     service = ReservationService(db)
     new_reservation, message = service.create_reservation(reservation)
 
+    # ── Notificación al cliente ────────────────────────────────────────────
     if new_reservation.status == "confirmed":
         whatsapp_service.send_confirmation(new_reservation)
     else:
         whatsapp_service.send_pending_notification(new_reservation)
-        whatsapp_service.notify_admin(new_reservation, message)
 
-    if new_reservation.special_flag:
-        whatsapp_service.notify_admin(
-            new_reservation,
-            "Reserva de 5-6 personas - verificar disponibilidad"
-        )
+    # ── Notificaciones al encargado según tramo de pax ────────────────────
+    pax = new_reservation.pax
 
+    if pax > MANAGER_THRESHOLD:
+        # > 15: encargado gestiona todo manualmente
+        whatsapp_service.notify_manager_required(new_reservation)
+
+    elif pax > LARGE_GROUP_THRESHOLD:
+        # 5-15: armar mesa especial y avisar a cocina
+        whatsapp_service.notify_large_group(new_reservation)
+
+    # ── Respuesta ─────────────────────────────────────────────────────────
     return ReservationResponse(
         id=new_reservation.id,
         client_id=new_reservation.client_id,
@@ -77,9 +92,7 @@ def list_reservations(
     status: str = None,
     db: Session = Depends(get_db)
 ):
-    """
-    **Lista reservas** con filtros opcionales (panel admin).
-    """
+    """Lista reservas con filtros opcionales (panel admin)."""
     service = ReservationService(db)
 
     if date:
@@ -110,20 +123,14 @@ def list_reservations(
 
 
 @router.get("/{reservation_id}", response_model=ReservationResponse)
-def get_reservation(
-    reservation_id: int,
-    db: Session = Depends(get_db)
-):
-    """
-    **Obtiene una reserva específica** por ID.
-    """
+def get_reservation(reservation_id: int, db: Session = Depends(get_db)):
+    """Obtiene una reserva específica por ID."""
     reservation = db.query(Reservation).filter(Reservation.id == reservation_id).first()
     if not reservation:
         raise HTTPException(
             status_code=http_status.HTTP_404_NOT_FOUND,
             detail="Reserva no encontrada"
         )
-
     return ReservationResponse(
         id=reservation.id,
         client_id=reservation.client_id,
@@ -152,40 +159,29 @@ def update_reservation_status(
     db: Session = Depends(get_db),
     current_user: UserInDB = Depends(require_admin)
 ):
-    """
-    **Actualiza el estado de una reserva**. Requiere autenticación de administrador.
-    """
+    """Actualiza el estado de una reserva. Requiere autenticación de administrador."""
     service = ReservationService(db)
     audit = AuditService(db)
 
+    reservation = db.query(Reservation).filter(Reservation.id == reservation_id).first()
+    if not reservation:
+        raise HTTPException(status_code=http_status.HTTP_404_NOT_FOUND, detail="Reserva no encontrada")
+
+    previous_status = reservation.status
+    previous_table = reservation.table.name if reservation.table else None
+
     try:
-        # Capturar estado anterior antes de modificar
-        reservation = db.query(Reservation).filter(Reservation.id == reservation_id).first()
-        if not reservation:
-            raise ReservationNotFoundError()
-
-        previous_status = reservation.status
-        previous_table = reservation.table.name if reservation.table else None
-
         updated = service.update_reservation_status(
             reservation_id=reservation_id,
             status=body.status,
             table_id=body.table_id,
             admin_notes=body.admin_notes
         )
-
     except ReservationNotFoundError:
-        raise HTTPException(
-            status_code=http_status.HTTP_404_NOT_FOUND,
-            detail="Reserva no encontrada"
-        )
+        raise HTTPException(status_code=http_status.HTTP_404_NOT_FOUND, detail="Reserva no encontrada")
     except TableUnavailableError as e:
-        raise HTTPException(
-            status_code=http_status.HTTP_409_CONFLICT,
-            detail=str(e)
-        )
+        raise HTTPException(status_code=http_status.HTTP_409_CONFLICT, detail=str(e))
 
-    # Auditar cambio de estado
     if previous_status != body.status:
         audit.log(
             reservation_id=reservation_id,
@@ -196,14 +192,12 @@ def update_reservation_status(
             note=body.admin_notes,
         )
 
-    # Auditar asignación de mesa
     if body.table_id is not None:
-        new_table_name = updated.table.name if updated.table else str(body.table_id)
         audit.log(
             reservation_id=reservation_id,
             action="table_assigned",
             previous_value=previous_table,
-            new_value=new_table_name,
+            new_value=updated.table.name if updated.table else str(body.table_id),
             performed_by=current_user.username,
         )
 
@@ -221,15 +215,10 @@ def cancel_reservation(
     db: Session = Depends(get_db),
     current_user: UserInDB = Depends(require_admin)
 ):
-    """
-    **Cancela una reserva**. Requiere autenticación de administrador.
-    """
+    """Cancela una reserva. Requiere autenticación de administrador."""
     reservation = db.query(Reservation).filter(Reservation.id == reservation_id).first()
     if not reservation:
-        raise HTTPException(
-            status_code=http_status.HTTP_404_NOT_FOUND,
-            detail="Reserva no encontrada"
-        )
+        raise HTTPException(status_code=http_status.HTTP_404_NOT_FOUND, detail="Reserva no encontrada")
 
     previous_status = reservation.status
     reservation.status = "cancelled"
