@@ -29,6 +29,8 @@ class Settings(BaseSettings):
     TWILIO_AUTH_TOKEN: Optional[str] = None
     TWILIO_WHATSAPP_FROM: Optional[str] = None
     ADMIN_WHATSAPP: Optional[str] = None
+    CHEF_WHATSAPP: Optional[str] = None
+    OWNER_WHATSAPP: Optional[str] = None
 
     # CORS — URL del frontend desplegado
     # En desarrollo puede ser http://localhost:3000

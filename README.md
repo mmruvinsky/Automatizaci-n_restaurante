@@ -1,4 +1,4 @@
-# 🍽️ Sistema de Reservas - Jamonería
+# 🍽️ Sistema de Reservas - MM Jamonería
 
 Sistema inteligente de gestión de reservas con asignación automática de mesas, gestión de clientes VIP y notificaciones por WhatsApp.
 
@@ -16,7 +16,7 @@ Sistema inteligente de gestión de reservas con asignación automática de mesas
 
 ```
 Backend: Python + FastAPI + PostgreSQL + SQLAlchemy
-Frontend: React + Next.js (próxima fase)
+Frontend: React + Next.js 
 Notificaciones: Twilio WhatsApp API
 ```
 
